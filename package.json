@@ -11,7 +11,7 @@
   "scripts": {
     "build": "npm run clean && tsc",
     "clean": "rimraf build",
-    "deploy": "DEBUG=browserless* ./scripts/deploy.js",
+    "deploy": "gcloud builds submit --tag gcr.io/tappable-staging/tappable-browserless && gcloud run deploy tappable-browserless --image gcr.io/tappable-staging/tappable-browserless --region us-central1 --memory 2G --concurrency 4 --platform managed",
     "dev": "npm run build && env-cmd -f ./.env.dev node build/index.js",
     "meta": "./scripts/get-meta.js",
     "start": "node ./build",
