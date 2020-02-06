@@ -7,7 +7,6 @@ import * as puppeteer from 'puppeteer';
 import { Transform } from 'stream';
 import * as url from 'url';
 
-import { CHROME_BINARY_LOCATION, DEBUG } from './config';
 import { Feature } from './features';
 import { browserHook, pageHook } from './hooks';
 import { fetchJson, getDebug, getUserDataDir, IHTTPRequest, rimraf } from './utils';
@@ -25,12 +24,19 @@ import {
   PORT,
   WORKSPACE_DIR,
 } from './config';
+import { ParsedUrlQuery } from 'querystring';
 
 const debug = getDebug('chrome-helper');
 const getPort = require('get-port');
 const treekill = require('tree-kill');
+const {
+  CHROME_BINARY_LOCATION,
+  USE_CHROME_STABLE,
+  PUPPETEER_CHROMIUM_REVISION,
+} = require('../env');
 
 const BROWSERLESS_ARGS = ['--no-sandbox', '--enable-logging', '--v1=1'];
+
 const blacklist = require('../hosts.json');
 
 let runningBrowsers: IBrowser[] = [];
@@ -74,6 +80,22 @@ export interface ILaunchOptions extends puppeteer.LaunchOptions {
   keepalive?: number;
 }
 
+const parseIgnoreDefaultArgs = (query: ParsedUrlQuery): string[] | boolean => {
+  const defaultArgs = query.ignoreDefaultArgs;
+
+  if (_.isUndefined(defaultArgs) || defaultArgs === 'false') {
+    return false;
+  }
+
+  if (defaultArgs === '' || defaultArgs === 'true') {
+    return true;
+  }
+
+  return Array.isArray(defaultArgs) ?
+    defaultArgs :
+    defaultArgs.split(',');
+};
+
 const setupPage = async ({
   page,
   pauseOnConnect,
@@ -90,7 +112,13 @@ const setupPage = async ({
   await pageHook({ page });
 
   // Don't let us intercept these as they're needed by consumers
-  client.send('Page.setInterceptFileChooserDialog', { enabled: false });
+  // Fixed in later version of chromium
+  if (USE_CHROME_STABLE || PUPPETEER_CHROMIUM_REVISION <= 706915) {
+    debug(`Patching file-chooser dialog`);
+    client
+      .send('Page.setInterceptFileChooserDialog', { enabled: false })
+      .catch(_.noop);
+  }
 
   if (!DISABLE_AUTO_SET_DOWNLOAD_BEHAVIOR) {
     const workspaceDir = trackingId ?
@@ -158,7 +186,10 @@ const setupBrowser = async ({
 
   await browserHook({ browser: iBrowser });
 
-  iBrowser._browserProcess.on('exit', () => closeBrowser(iBrowser));
+  iBrowser._browserProcess.once('exit', (code, signal) => {
+    debug(`Browser process exited with code ${code} and signal ${signal}, cleaning up`);
+    closeBrowser(iBrowser)
+  });
 
   iBrowser.on('targetcreated', async (target) => {
     try {
@@ -258,7 +289,6 @@ export const convertUrlParamsToLaunchOpts = (req: IHTTPRequest): ILaunchOptions 
   const {
     blockAds,
     headless,
-    ignoreDefaultArgs,
     ignoreHTTPSErrors,
     slowMo,
     userDataDir,
@@ -273,12 +303,13 @@ export const convertUrlParamsToLaunchOpts = (req: IHTTPRequest): ILaunchOptions 
 
   const parsedKeepalive = _.parseInt(keepaliveQuery as string);
   const keepalive = _.isNaN(parsedKeepalive) ? undefined : parsedKeepalive;
+  const parsedIgnoreDefaultArgs = parseIgnoreDefaultArgs(urlParts.query);
 
   return {
     args: !_.isEmpty(args) ? args : DEFAULT_LAUNCH_ARGS,
     blockAds: !_.isUndefined(blockAds) || DEFAULT_BLOCK_ADS,
     headless: isHeadless,
-    ignoreDefaultArgs: !_.isUndefined(ignoreDefaultArgs) || DEFAULT_IGNORE_DEFAULT_ARGS,
+    ignoreDefaultArgs: parsedIgnoreDefaultArgs,
     ignoreHTTPSErrors: !_.isUndefined(ignoreHTTPSErrors) || DEFAULT_IGNORE_HTTPS_ERRORS,
     keepalive,
     pauseOnConnect: !_.isUndefined(pause),
@@ -379,11 +410,6 @@ export const launchChromeDriver = async ({
       return reject(`Couldn't setup the chromedriver process`);
     }
 
-    // Does user want verbose logging?
-    if (DEBUG !== '*') {
-      chromeProcess.stderr.unpipe(process.stderr);
-    }
-
     chromeProcess.stderr.pipe(findPort);
 
     return resolve({
@@ -393,8 +419,6 @@ export const launchChromeDriver = async ({
     });
   });
 };
-
-export const getChromePath = () => CHROME_BINARY_LOCATION;
 
 export const killAll = async () => {
   await Promise.all(runningBrowsers.map((browser) => closeBrowser(browser)));
